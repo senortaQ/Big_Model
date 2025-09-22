@@ -1,250 +1,137 @@
-import argparse
 import os
-import sys
+from PIL import Image, ImageDraw, ImageFont
+import exifread
 from datetime import datetime
-from pathlib import Path
-from typing import Iterable, Optional, Tuple
 
-from PIL import Image, ImageDraw, ImageFont, ExifTags
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Add shooting date watermark (YYYY-MM-DD) from EXIF to images."
-    )
-    parser.add_argument(
-        "path",
-        help="Image file or directory path. If file is given, its directory will be used as the source directory.",
-    )
-    parser.add_argument(
-        "--font-size",
-        type=int,
-        default=36,
-        help="Font size in pixels (default: 36)",
-    )
-    parser.add_argument(
-        "--color",
-        default="#FFFFFF",
-        help="Text color (hex like #RRGGBB or named color, default: #FFFFFF)",
-    )
-    parser.add_argument(
-        "--position",
-        choices=[
-            "top-left",
-            "top-right",
-            "bottom-left",
-            "bottom-right",
-            "center",
-        ],
-        default="bottom-right",
-        help="Watermark position on the image (default: bottom-right)",
-    )
-    parser.add_argument(
-        "--margin",
-        type=int,
-        default=20,
-        help="Margin from edges in pixels (default: 20)",
-    )
-    parser.add_argument(
-        "--font-path",
-        default=None,
-        help="Optional path to a .ttf/.otf font file. If not provided, a default font will be used.",
-    )
-    parser.add_argument(
-        "--recursive",
-        action="store_true",
-        help="Recursively process subdirectories (only when path is a directory).",
-    )
-    return parser.parse_args()
-
-
-def resolve_source_and_output(path_str: str) -> Tuple[Path, Path]:
-    path = Path(path_str)
-    if not path.exists():
-        print(f"Error: Path does not exist: {path}")
-        sys.exit(1)
-
-    if path.is_file():
-        source_dir = path.parent
-    else:
-        source_dir = path
-
-    output_dir = source_dir / "_watermark"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return source_dir, output_dir
-
-
-def iter_images(root: Path, recursive: bool) -> Iterable[Path]:
-    image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".gif", ".webp"}
-    if recursive:
-        for p in root.rglob("*"):
-            if p.is_file() and p.suffix.lower() in image_exts and "_watermark" not in p.parts:
-                yield p
-    else:
-        for p in root.iterdir():
-            if p.is_file() and p.suffix.lower() in image_exts and p.parent.name != "_watermark":
-                yield p
-
-
-def load_font(font_path: Optional[str], font_size: int) -> ImageFont.ImageFont:
-    if font_path:
-        try:
-            return ImageFont.truetype(font_path, font_size)
-        except Exception as exc:
-            print(f"Warning: Failed to load font at '{font_path}': {exc}. Fallback to default font.")
-    # Try common system fonts on Windows as a nicety
-    for candidate in [
-        "C:/Windows/Fonts/arial.ttf",
-        "C:/Windows/Fonts/msyh.ttc",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ]:
-        try:
-            if Path(candidate).exists():
-                return ImageFont.truetype(candidate, font_size)
-        except Exception:
-            pass
-    return ImageFont.load_default()
-
-
-def extract_shoot_date(image: Image.Image, fallback_path: Path) -> Optional[str]:
-    exif = getattr(image, "_getexif", lambda: None)()
-    exif_dict = {}
-    if exif:
-        for tag_id, value in exif.items():
-            tag = ExifTags.TAGS.get(tag_id, tag_id)
-            exif_dict[tag] = value
-
-    # Prefer DateTimeOriginal, fall back to DateTime
-    for key in ("DateTimeOriginal", "DateTime"):
-        if key in exif_dict and isinstance(exif_dict[key], str):
-            dt_str = exif_dict[key]
-            # Typical format: "YYYY:MM:DD HH:MM:SS"
-            try:
-                dt = datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S")
-                return dt.strftime("%Y-%m-%d")
-            except Exception:
-                # Try other common formats if present
-                for fmt in [
-                    "%Y-%m-%d %H:%M:%S",
-                    "%Y/%m/%d %H:%M:%S",
-                    "%Y:%m:%d",
-                    "%Y-%m-%d",
-                    "%Y/%m/%d",
-                ]:
-                    try:
-                        dt = datetime.strptime(dt_str, fmt)
-                        return dt.strftime("%Y-%m-%d")
-                    except Exception:
-                        continue
-
-    # Fallback: use file's modified time
+def get_exif_date(image_path):
+    """
+    读取图片的EXIF信息中的拍摄时间
+    """
     try:
-        mtime = datetime.fromtimestamp(fallback_path.stat().st_mtime)
-        return mtime.strftime("%Y-%m-%d")
-    except Exception:
+        with open(image_path, 'rb') as f:
+            tags = exifread.process_file(f)
+            
+        # 尝试获取拍摄时间
+        date_taken = None
+        for tag in ('EXIF DateTimeOriginal', 'EXIF DateTimeDigitized', 'Image DateTime'):
+            if tag in tags:
+                date_taken = str(tags[tag])
+                break
+                
+        if date_taken:
+            # 将日期字符串转换为datetime对象
+            dt = datetime.strptime(date_taken, '%Y:%m:%d %H:%M:%S')
+            return dt.strftime('%Y年%m月%d日')
+        return None
+    except:
         return None
 
-
-def compute_position(
-    img_size: Tuple[int, int], text_size: Tuple[int, int], position: str, margin: int
-) -> Tuple[int, int]:
-    img_w, img_h = img_size
-    text_w, text_h = text_size
-
-    if position == "top-left":
-        return margin, margin
-    if position == "top-right":
-        return img_w - text_w - margin, margin
-    if position == "bottom-left":
-        return margin, img_h - text_h - margin
-    if position == "bottom-right":
-        return img_w - text_w - margin, img_h - text_h - margin
-    # center
-    return (img_w - text_w) // 2, (img_h - text_h) // 2
-
-
-def draw_watermark(
-    image_path: Path,
-    output_dir: Path,
-    font: ImageFont.ImageFont,
-    color: str,
-    position: str,
-    margin: int,
-) -> Optional[Path]:
+def add_watermark(image_path, text, font_size=36, color=(255, 255, 255), position='right-bottom'):
+    """
+    在图片上添加水印
+    """
     try:
-        with Image.open(image_path).convert("RGBA") as im:
-            date_text = extract_shoot_date(im, image_path)
-            if not date_text:
-                print(f"Skip (no date): {image_path}")
-                return None
-
-            # Render text size
-            dummy_draw = ImageDraw.Draw(im)
-            text_bbox = dummy_draw.textbbox((0, 0), date_text, font=font, stroke_width=2)
-            text_w = text_bbox[2] - text_bbox[0]
-            text_h = text_bbox[3] - text_bbox[1]
-            x, y = compute_position(im.size, (text_w, text_h), position, margin)
-
-            # Draw on a new layer for alpha blending
-            txt_layer = Image.new("RGBA", im.size, (255, 255, 255, 0))
-            draw = ImageDraw.Draw(txt_layer)
-
-            # Add a subtle shadow/stroke for visibility
-            draw.text(
-                (x, y),
-                date_text,
-                font=font,
-                fill=color,
-                stroke_width=2,
-                stroke_fill="black",
-            )
-
-            combined = Image.alpha_composite(im, txt_layer).convert("RGB")
-
-            out_path = output_dir / image_path.name
-            combined.save(out_path)
-            return out_path
-    except Exception as exc:
-        print(f"Error processing {image_path}: {exc}")
+        # 打开图片
+        img = Image.open(image_path)
+        
+        # 创建绘图对象
+        draw = ImageDraw.Draw(img)
+        
+        # 加载字体
+        try:
+            font = ImageFont.truetype("simhei.ttf", font_size)
+        except:
+            # 如果找不到指定字体，使用默认字体
+            font = ImageFont.load_default()
+        
+        # 获取文本大小
+        text_bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
+        
+        # 计算水印位置
+        img_width, img_height = img.size
+        padding = 10
+        
+        if position == 'left-top':
+            x = padding
+            y = padding
+        elif position == 'center':
+            x = (img_width - text_width) // 2
+            y = (img_height - text_height) // 2
+        else:  # 默认右下角
+            x = img_width - text_width - padding
+            y = img_height - text_height - padding
+        
+        # 绘制水印文字
+        draw.text((x, y), text, font=font, fill=color)
+        
+        return img
+    except Exception as e:
+        print(f"添加水印时出错: {str(e)}")
         return None
 
-
-def main() -> None:
-    args = parse_args()
-    source_dir, output_dir = resolve_source_and_output(args.path)
-
-    font = load_font(args.font_path, args.font_size)
-
-    images = list(iter_images(source_dir, args.recursive))
-    if not images:
-        print("No images found to process.")
+def process_images(input_path):
+    """
+    处理指定路径下的所有图片
+    """
+    if not os.path.exists(input_path):
+        print(f"错误: 路径 '{input_path}' 不存在")
         return
-
-    print(f"Source: {source_dir}")
-    print(f"Output: {output_dir}")
-    print(f"Found {len(images)} image(s). Processing...")
-
-    processed = 0
-    for img_path in images:
-        result = draw_watermark(
-            image_path=img_path,
-            output_dir=output_dir,
-            font=font,
-            color=args.color,
-            position=args.position,
-            margin=args.margin,
+    
+    # 如果输入的是文件，则将其目录作为基准目录
+    if os.path.isfile(input_path):
+        base_dir = os.path.dirname(input_path)
+        files = [input_path]
+    else:
+        base_dir = input_path
+        # 获取所有图片文件
+        files = []
+        for f in os.listdir(input_path):
+            if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
+                files.append(os.path.join(input_path, f))
+    
+    # 创建输出目录
+    output_dir = os.path.join(base_dir, os.path.basename(base_dir) + '_watermark')
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 处理每个图片
+    for img_path in files:
+        # 获取拍摄日期
+        date_text = get_exif_date(img_path)
+        if not date_text:
+            date_text = "未知日期"  # 如果无法获取拍摄日期，使用默认文本
+        
+        # 添加水印
+        watermarked = add_watermark(
+            img_path,
+            date_text,
+            font_size=int(input("请输入字体大小 (默认36): ") or 36),
+            color=eval(input("请输入颜色RGB值，格式(R,G,B) (默认白色(255,255,255)): ") or "(255,255,255)"),
+            position=input("请输入水印位置 (left-top/center/right-bottom，默认right-bottom): ") or "right-bottom"
         )
-        if result:
-            processed += 1
+        
+        if watermarked:
+            # 保存处理后的图片
+            output_path = os.path.join(output_dir, os.path.basename(img_path))
+            watermarked.save(output_path)
+            print(f"已处理: {os.path.basename(img_path)}")
+        else:
+            print(f"处理失败: {os.path.basename(img_path)}")
 
-    print(f"Done. Watermarked {processed}/{len(images)} image(s).")
-
+def main():
+    print("图片水印添加工具")
+    print("=" * 30)
+    
+    # 获取用户输入
+    input_path = input("请输入图片文件或目录路径: ").strip('"')  # 去除可能的引号
+    
+    if not input_path:
+        print("错误: 请提供有效的路径")
+        return
+    
+    process_images(input_path)
+    print("处理完成!")
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
